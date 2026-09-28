@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: basecamp-classic-mcp
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install uv && uv sync --frozen
+    startCommand: uv run python server.py
+    autoDeploy: true
+    envVars:
+      - key: MCP_TRANSPORT
+        value: http
+      - key: PYTHON_VERSION
+        value: "3.13.0"
+      - key: MCP_AUTH_TOKEN
+        generateValue: true
+      - key: BASECAMP_URL
+        sync: false
+      - key: BASECAMP_USERNAME
+        sync: false
+      - key: BASECAMP_PASSWORD
+        sync: false

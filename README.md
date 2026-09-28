@@ -2,43 +2,90 @@
 
 An MCP server for the [Basecamp Classic API](https://github.com/basecamp/basecamp-classic-api), built with [FastMCP](https://github.com/jlowin/fastmcp).
 
-## Setup
+This fork is set up for team use from ChatGPT:
+
+- Streamable HTTP transport for remote connectors
+- Shared bearer-token gate (`MCP_AUTH_TOKEN`)
+- Runs as a single Basecamp bot user
+- Destructive delete tools removed
+
+Forked from [Boian/basecamp-classic-mcp](https://github.com/Boian/basecamp-classic-mcp).
+
+## Basecamp bot user
+
+1. In Basecamp Classic, add a person such as **MCP Bot** / `mcp-bot@yourcompany.com`.
+2. Give that person access to the projects the team should reach through ChatGPT.
+3. Sign in as the bot (or have an admin open its **My info** page) and copy its **API token**.
+4. Use the token as `BASECAMP_USERNAME` and set `BASECAMP_PASSWORD` to `X`.
+
+Every ChatGPT action (messages, todos, time entries) will be attributed to this bot.
+
+## Configuration
+
+| Variable | Description |
+|---|---|
+| `BASECAMP_URL` | Your Basecamp account URL, e.g. `https://yourcompany.basecamphq.com` |
+| `BASECAMP_USERNAME` | Bot API token (preferred) or username |
+| `BASECAMP_PASSWORD` | `X` when using an API token |
+| `MCP_AUTH_TOKEN` | Shared secret ChatGPT clients send as a bearer token (required for HTTP) |
+| `MCP_TRANSPORT` | `stdio` (default) or `http` |
+| `PORT` | HTTP listen port (Render sets this automatically) |
+
+## Local setup
 
 ```bash
 uv sync
 ```
 
-## Configuration
-
-Set these environment variables before running:
-
-| Variable | Description |
-|---|---|
-| `BASECAMP_URL` | Your Basecamp account URL, e.g. `https://yourcompany.basecamphq.com` |
-| `BASECAMP_USERNAME` | Your Basecamp username or API token |
-| `BASECAMP_PASSWORD` | Your Basecamp password (or `X` if using an API token) |
-
-To use an API token instead of password: set `BASECAMP_USERNAME` to your token and `BASECAMP_PASSWORD` to `X`.
-
-## Running
+### stdio (Claude Desktop / Cursor)
 
 ```bash
-# stdio (for Claude Desktop / MCP clients)
 uv run python server.py
-
-# or via entry point
-uv run basecamp-classic-mcp
 ```
 
-## Development
-
-Use the MCP Inspector to interactively test tools in a browser UI:
+### HTTP (ChatGPT / remote clients)
 
 ```bash
-uv run --env-file .env fastmcp dev inspector server.py:mcp
+export MCP_TRANSPORT=http
+export MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+export BASECAMP_URL=https://yourcompany.basecamphq.com
+export BASECAMP_USERNAME=your-bot-api-token
+export BASECAMP_PASSWORD=X
+uv run python server.py
 ```
 
-## Claude Desktop configuration
+The MCP endpoint is `http://localhost:8000/mcp`.
+
+## Deploy on Render
+
+This repo is meant to run as a Render **Web Service**:
+
+- **Runtime:** Python
+- **Build command:** `pip install uv && uv sync --frozen`
+- **Start command:** `uv run python server.py`
+- **Env vars:** `MCP_TRANSPORT=http`, plus `BASECAMP_*` and `MCP_AUTH_TOKEN`
+- **Plan:** Starter (or higher). Free instances sleep and drop MCP connections.
+
+After deploy, the connector URL is:
+
+```text
+https://<your-service>.onrender.com/mcp
+```
+
+## Connect from ChatGPT
+
+Each teammate (or a workspace admin) needs a paid ChatGPT plan with connectors enabled.
+
+1. Open **Settings → Apps & Connectors → Advanced** and turn on **Developer mode**.
+2. Create a new connector:
+   - **Name:** Basecamp Classic
+   - **MCP Server URL:** `https://<your-service>.onrender.com/mcp`
+   - **Authentication:** Token
+   - **Token:** the value of `MCP_AUTH_TOKEN`
+3. Trust the connector and confirm the tools load.
+4. In a chat, enable the connector and ask something like “list our active Basecamp projects”.
+
+## Claude Desktop (local stdio)
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -50,7 +97,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "args": ["run", "--directory", "/path/to/basecamp-classic-mcp", "python", "server.py"],
       "env": {
         "BASECAMP_URL": "https://yourcompany.basecamphq.com",
-        "BASECAMP_USERNAME": "your-api-token",
+        "BASECAMP_USERNAME": "your-bot-api-token",
         "BASECAMP_PASSWORD": "X"
       }
     }
@@ -58,23 +105,22 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-## Available Tools
+## Available tools
 
 ### Projects
 - `list_projects` — List all active projects
 - `get_project(project_id)` — Get project details
 
-### To-do Lists
+### To-do lists
 - `list_todo_lists(project_id)` — List to-do lists in a project
 - `get_todo_list(todo_list_id)` — Get a to-do list with its items
 
-### To-do Items
+### To-do items
 - `list_todo_items(todo_list_id)` — List items in a to-do list
 - `create_todo_item(todo_list_id, content, ...)` — Create a new to-do item
 - `update_todo_item(todo_item_id, ...)` — Update an existing to-do item
 - `complete_todo_item(todo_item_id)` — Mark an item complete
 - `uncomplete_todo_item(todo_item_id)` — Mark an item incomplete
-- `delete_todo_item(todo_item_id)` — Delete a to-do item
 
 ### Messages
 - `list_messages(project_id)` — List recent messages in a project
@@ -95,6 +141,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 - `complete_milestone(milestone_id)` — Mark a milestone complete
 - `uncomplete_milestone(milestone_id)` — Mark a milestone incomplete
 
-### Time Entries
+### Time entries
 - `list_time_entries(project_id)` — List time entries for a project
 - `create_time_entry(project_id, date, hours, description, ...)` — Log time on a project
+
+Deleted intentionally: `delete_todo_item`.

@@ -7,16 +7,33 @@ from typing import Optional
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mcp.types import ToolAnnotations
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
-DESTRUCTIVE = ToolAnnotations(destructiveHint=True)
-
-mcp = FastMCP("Basecamp Classic")
 
 BASECAMP_URL = os.environ.get("BASECAMP_URL", "").rstrip("/")
 BASECAMP_USERNAME = os.environ.get("BASECAMP_USERNAME", "")
 BASECAMP_PASSWORD = os.environ.get("BASECAMP_PASSWORD", "")
+MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
+
+
+def _build_auth() -> Optional[StaticTokenVerifier]:
+    """Require a shared bearer token for remote (HTTP) clients."""
+    if not MCP_AUTH_TOKEN:
+        return None
+    return StaticTokenVerifier(
+        tokens={
+            MCP_AUTH_TOKEN: {
+                "client_id": "basecamp-bot",
+                "scopes": ["basecamp"],
+            }
+        },
+        required_scopes=["basecamp"],
+    )
+
+
+mcp = FastMCP("Basecamp Classic", auth=_build_auth())
 
 
 def _client() -> httpx.Client:
@@ -56,13 +73,6 @@ def _put(path: str, body: str = "") -> ET.Element:
         if response.text.strip():
             return ET.fromstring(response.text)
         return ET.Element("ok")
-
-
-def _delete(path: str) -> str:
-    with _client() as client:
-        response = client.delete(path)
-        response.raise_for_status()
-        return "Deleted successfully"
 
 
 def _elem_text(el: Optional[ET.Element], tag: str, default: str = "") -> str:
@@ -268,16 +278,6 @@ def uncomplete_todo_item(todo_item_id: int) -> str:
     """
     _put(f"/todo_items/{todo_item_id}/uncomplete")
     return f"Todo item {todo_item_id} marked incomplete"
-
-
-@mcp.tool(annotations=DESTRUCTIVE)
-def delete_todo_item(todo_item_id: int) -> str:
-    """Delete a to-do item.
-
-    Args:
-        todo_item_id: The numeric to-do item ID.
-    """
-    return _delete(f"/todo_items/{todo_item_id}.xml")
 
 
 # ─── Messages ────────────────────────────────────────────────────────────────
@@ -563,4 +563,14 @@ def resource_list_people() -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    if transport in {"http", "streamable-http"}:
+        if not MCP_AUTH_TOKEN:
+            raise SystemExit(
+                "MCP_AUTH_TOKEN is required when MCP_TRANSPORT=http "
+                "(set a shared secret for ChatGPT / remote clients)"
+            )
+        port = int(os.environ.get("PORT", "8000"))
+        mcp.run(transport="http", host="0.0.0.0", port=port, path="/mcp")
+    else:
+        mcp.run()
