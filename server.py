@@ -3,6 +3,7 @@
 import json
 import os
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -51,10 +52,74 @@ def _client() -> httpx.Client:
 
 
 def _get(path: str) -> ET.Element:
+    root, _headers = _fetch(path)
+    return root
+
+
+def _fetch(path: str) -> tuple[ET.Element, dict[str, str]]:
     with _client() as client:
         response = client.get(path)
         response.raise_for_status()
-        return ET.fromstring(response.text)
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        if response.text.strip():
+            return ET.fromstring(response.text), headers
+        return ET.Element("ok"), headers
+
+
+# Basecamp pages time entries 50 at a time. Stop well past any real project
+# so a missing X-Pages header cannot loop forever.
+_MAX_PAGES = 200
+
+
+def _paged(path: str, item_tag: str) -> tuple[list[ET.Element], bool]:
+    """Follow Basecamp's page query param and X-Pages header."""
+    items: list[ET.Element] = []
+    seen: set[str] = set()
+    page = 1
+    while page <= _MAX_PAGES:
+        separator = "&" if "?" in path else "?"
+        root, headers = _fetch(f"{path}{separator}page={page}")
+        batch = root.findall(item_tag)
+        if not batch:
+            return items, False
+        added = 0
+        for element in batch:
+            item_id = _elem_text(element, "id")
+            if item_id and item_id in seen:
+                continue
+            if item_id:
+                seen.add(item_id)
+            items.append(element)
+            added += 1
+        # A repeated page means this endpoint ignores the page parameter.
+        if added == 0:
+            return items, False
+        total_pages = int(headers.get("x-pages") or "0")
+        if total_pages:
+            if page >= total_pages:
+                return items, False
+        elif len(batch) < 50:
+            return items, False
+        page += 1
+    return items, True
+
+
+def _parse_date(value: str) -> datetime:
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(value.strip(), fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Date must be YYYY-MM-DD, got {value!r}")
+
+
+def _date_windows(start: datetime, end: datetime):
+    """Split a range into chunks the report endpoint will accept (max 6 months)."""
+    cursor = start
+    while cursor <= end:
+        window_end = min(end, cursor + timedelta(days=180))
+        yield cursor, window_end
+        cursor = window_end + timedelta(days=1)
 
 
 def _post(path: str, body: str) -> ET.Element:
@@ -469,25 +534,71 @@ def uncomplete_milestone(milestone_id: int) -> str:
 # ─── Time Entries ─────────────────────────────────────────────────────────────
 
 
+def _time_entry_dict(entry: ET.Element) -> dict:
+    return {
+        "id": _elem_text(entry, "id"),
+        "person_id": _elem_text(entry, "person-id"),
+        "person_name": _elem_text(entry, "person-name"),
+        "date": _elem_text(entry, "date"),
+        "hours": _elem_text(entry, "hours"),
+        "description": _elem_text(entry, "description"),
+        "todo_item_id": _elem_text(entry, "todo-item-id"),
+    }
+
+
 @mcp.tool(annotations=READ_ONLY)
-def list_time_entries(project_id: int) -> list[dict]:
-    """List all time entries for a project.
+def list_time_entries(
+    project_id: int,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> dict:
+    """List time entries for a project, following every result page.
+
+    Basecamp returns 50 entries per page. This walks all pages. Pass both
+    from_date and to_date (YYYY-MM-DD) for a bounded report such as a month.
+    Ranges longer than six months are requested in chunks, which is the
+    report endpoint's limit.
 
     Args:
         project_id: The numeric project ID.
+        from_date: Optional start date, inclusive, YYYY-MM-DD.
+        to_date: Optional end date, inclusive, YYYY-MM-DD.
     """
-    root = _get(f"/projects/{project_id}/time_entries.xml")
-    entries = []
-    for entry in root.findall("time-entry"):
-        entries.append({
-            "id": _elem_text(entry, "id"),
-            "person_name": _elem_text(entry, "person-name"),
-            "date": _elem_text(entry, "date"),
-            "hours": _elem_text(entry, "hours"),
-            "description": _elem_text(entry, "description"),
-            "todo_item_id": _elem_text(entry, "todo-item-id"),
-        })
-    return entries
+    if (from_date is None) != (to_date is None):
+        raise ValueError("Pass both from_date and to_date, or neither")
+
+    elements: list[ET.Element] = []
+    truncated = False
+    if from_date and to_date:
+        start = _parse_date(from_date)
+        end = _parse_date(to_date)
+        if end < start:
+            raise ValueError("to_date must be on or after from_date")
+        for window_start, window_end in _date_windows(start, end):
+            path = (
+                "/time_entries/report.xml"
+                f"?from={window_start:%Y%m%d}&to={window_end:%Y%m%d}"
+                f"&filter_project_id={project_id}"
+            )
+            batch, hit_cap = _paged(path, "time-entry")
+            elements.extend(batch)
+            truncated = truncated or hit_cap
+    else:
+        elements, truncated = _paged(
+            f"/projects/{project_id}/time_entries.xml", "time-entry"
+        )
+
+    entries = [_time_entry_dict(entry) for entry in elements]
+    total_hours = round(sum(float(entry["hours"] or 0) for entry in entries), 2)
+    return {
+        "project_id": project_id,
+        "from_date": from_date,
+        "to_date": to_date,
+        "count": len(entries),
+        "total_hours": total_hours,
+        "truncated": truncated,
+        "entries": entries,
+    }
 
 
 @mcp.tool

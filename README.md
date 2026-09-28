@@ -142,7 +142,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 - `uncomplete_milestone(milestone_id)` — Mark a milestone incomplete
 
 ### Time entries
-- `list_time_entries(project_id)` — List time entries for a project
+- `list_time_entries(project_id, from_date, to_date)` — List time entries for a project, following every page. Pass both dates (YYYY-MM-DD) for a range such as a month. The result includes `count`, `total_hours`, and `truncated`.
 - `create_time_entry(project_id, date, hours, description, ...)` — Log time on a project
 
 Deleted intentionally: `delete_todo_item`.
