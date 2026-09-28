@@ -12,10 +12,10 @@ from mcp.types import ToolAnnotations
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
-BASECAMP_URL = os.environ.get("BASECAMP_URL", "").rstrip("/")
-BASECAMP_USERNAME = os.environ.get("BASECAMP_USERNAME", "")
-BASECAMP_PASSWORD = os.environ.get("BASECAMP_PASSWORD", "")
-MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
+BASECAMP_URL = os.environ.get("BASECAMP_URL", "").strip().rstrip("/")
+BASECAMP_USERNAME = os.environ.get("BASECAMP_USERNAME", "").strip()
+BASECAMP_PASSWORD = os.environ.get("BASECAMP_PASSWORD", "").strip()
+MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
 
 
 def _build_auth() -> Optional[StaticTokenVerifier]:
@@ -563,7 +563,7 @@ def resource_list_people() -> str:
 
 
 if __name__ == "__main__":
-    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").strip().lower()
     if transport in {"http", "streamable-http"}:
         if not MCP_AUTH_TOKEN:
             raise SystemExit(
