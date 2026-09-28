@@ -84,11 +84,17 @@ def _elem_text(el: Optional[ET.Element], tag: str, default: str = "") -> str:
     return child.text.strip()
 
 
+# Fields the Basecamp API returns that must never reach an MCP client.
+SENSITIVE_FIELDS = {"token", "password", "api_token"}
+
+
 def _elem_to_dict(el: ET.Element) -> dict:
-    """Convert an XML element's direct children to a dict."""
+    """Convert an XML element's direct children to a dict, dropping secrets."""
     result = {}
     for child in el:
         tag = child.tag.replace("-", "_")
+        if tag in SENSITIVE_FIELDS:
+            continue
         result[tag] = child.text.strip() if child.text else ""
     return result
 
