@@ -117,8 +117,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### To-do items
 - `list_todo_items(todo_list_id)` — List items in a to-do list
-- `create_todo_item(todo_list_id, content, ...)` — Create a new to-do item
-- `update_todo_item(todo_item_id, ...)` — Update an existing to-do item
+- `create_todo_item(todo_list_id, content, ...)` — Create a new to-do item. Assignments use Basecamp's `responsible-party` field and are read back.
+- `update_todo_item(todo_item_id, ...)` — Update an existing to-do item. A mismatched assignee is returned as `assignment_warning`.
 - `complete_todo_item(todo_item_id)` — Mark an item complete
 - `uncomplete_todo_item(todo_item_id)` — Mark an item incomplete
 

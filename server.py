@@ -1,7 +1,9 @@
 """Basecamp Classic MCP Server"""
 
+import html
 import json
 import os
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import Optional
@@ -122,22 +124,43 @@ def _date_windows(start: datetime, end: datetime):
         cursor = window_end + timedelta(days=1)
 
 
-def _post(path: str, body: str) -> ET.Element:
+def _send(method: str, path: str, body: str = "") -> tuple[ET.Element, dict[str, str]]:
     with _client() as client:
-        response = client.post(path, content=body.encode())
+        response = client.request(method, path, content=body.encode() if body else None)
         response.raise_for_status()
+        headers = {key.lower(): value for key, value in response.headers.items()}
         if response.text.strip():
-            return ET.fromstring(response.text)
-        return ET.Element("ok")
+            return ET.fromstring(response.text), headers
+        return ET.Element("ok"), headers
+
+
+def _post(path: str, body: str) -> ET.Element:
+    root, _headers = _send("POST", path, body)
+    return root
 
 
 def _put(path: str, body: str = "") -> ET.Element:
-    with _client() as client:
-        response = client.put(path, content=body.encode())
-        response.raise_for_status()
-        if response.text.strip():
-            return ET.fromstring(response.text)
-        return ET.Element("ok")
+    root, _headers = _send("PUT", path, body)
+    return root
+
+
+def _xml_text(value: str) -> str:
+    return html.escape(value, quote=False)
+
+
+def _assignment_xml(responsible_party_id: Optional[int], notify: bool) -> list[str]:
+    """Basecamp writes assignments through <responsible-party>, not <responsible-party-id>."""
+    if responsible_party_id is None:
+        return []
+    parts = [f"<responsible-party>{int(responsible_party_id)}</responsible-party>"]
+    if notify and responsible_party_id:
+        parts.append('<notify type="boolean">true</notify>')
+    return parts
+
+
+def _id_from_location(location: str) -> str:
+    match = re.search(r"/todo_items/(\d+)", location)
+    return match.group(1) if match else ""
 
 
 def _elem_text(el: Optional[ET.Element], tag: str, default: str = "") -> str:
@@ -233,13 +256,7 @@ def get_todo_list(todo_list_id: int) -> dict:
     if items_el is not None:
         items = []
         for item in items_el.findall("todo-item"):
-            items.append({
-                "id": _elem_text(item, "id"),
-                "content": _elem_text(item, "content"),
-                "completed": _elem_text(item, "completed"),
-                "due_at": _elem_text(item, "due-at"),
-                "assignee": _elem_text(item, "responsible-party-name"),
-            })
+            items.append(_todo_item_dict(item))
         result["todo_items"] = items
     return result
 
@@ -257,16 +274,58 @@ def list_todo_items(todo_list_id: int) -> list[dict]:
     root = _get(f"/todo_lists/{todo_list_id}/todo_items.xml")
     items = []
     for item in root.findall("todo-item"):
-        items.append({
-            "id": _elem_text(item, "id"),
-            "content": _elem_text(item, "content"),
-            "completed": _elem_text(item, "completed"),
-            "due_at": _elem_text(item, "due-at"),
-            "created_on": _elem_text(item, "created-on"),
-            "assignee": _elem_text(item, "responsible-party-name"),
-            "creator": _elem_text(item, "creator-name"),
-        })
+        parsed = _todo_item_dict(item)
+        parsed["created_on"] = _elem_text(item, "created-on")
+        parsed["creator"] = _elem_text(item, "creator-name")
+        items.append(parsed)
     return items
+
+
+def _todo_item_dict(item: ET.Element) -> dict:
+    return {
+        "id": _elem_text(item, "id"),
+        "content": _elem_text(item, "content"),
+        "completed": _elem_text(item, "completed"),
+        "due_at": _elem_text(item, "due-at"),
+        "assignee": _elem_text(item, "responsible-party-name"),
+        "responsible_party_id": _elem_text(item, "responsible-party-id"),
+        "responsible_party_type": _elem_text(item, "responsible-party-type"),
+    }
+
+
+def _todo_item_xml(
+    content: Optional[str],
+    responsible_party_id: Optional[int],
+    due_at: Optional[str],
+    notify: bool,
+) -> str:
+    parts = []
+    if content is not None:
+        parts.append(f"<content>{_xml_text(content)}</content>")
+    if due_at:
+        parts.append(f"<due-at>{_xml_text(due_at)}</due-at>")
+    parts.extend(_assignment_xml(responsible_party_id, notify))
+    return f"<todo-item>{''.join(parts)}</todo-item>"
+
+
+def _load_saved_todo(item_id: str, fallback: ET.Element) -> ET.Element:
+    if not item_id:
+        return fallback
+    return _get(f"/todo_items/{item_id}.xml")
+
+
+def _with_assignment_check(item: dict, responsible_party_id: Optional[int]) -> dict:
+    if not responsible_party_id:
+        return item
+    saved = item.get("responsible_party_id") or ""
+    if saved == str(responsible_party_id):
+        return item
+    assignee = item.get("assignee") or "unassigned"
+    item["assignment_warning"] = (
+        f"Requested person {responsible_party_id}, but Basecamp saved this "
+        f"to-do as {assignee}."
+    )
+    return item
 
 
 @mcp.tool
@@ -286,16 +345,13 @@ def create_todo_item(
         due_at: Optional due date in YYYY-MM-DD format.
         notify: Whether to notify the assigned person.
     """
-    parts = [f"<content>{content}</content>"]
-    if responsible_party_id is not None:
-        parts.append(f"<responsible-party-id>{responsible_party_id}</responsible-party-id>")
-    if due_at:
-        parts.append(f"<due-at>{due_at}</due-at>")
-    if notify:
-        parts.append("<notify>true</notify>")
-    body = f"<todo-item>{''.join(parts)}</todo-item>"
-    root = _post(f"/todo_lists/{todo_list_id}/todo_items.xml", body)
-    return _elem_to_dict(root)
+    body = _todo_item_xml(content, responsible_party_id, due_at, notify)
+    root, headers = _send(
+        "POST", f"/todo_lists/{todo_list_id}/todo_items.xml", body
+    )
+    item_id = _elem_text(root, "id") or _id_from_location(headers.get("location", ""))
+    saved = _load_saved_todo(item_id, root)
+    return _with_assignment_check(_todo_item_dict(saved), responsible_party_id)
 
 
 @mcp.tool
@@ -315,18 +371,10 @@ def update_todo_item(
         due_at: Due date in YYYY-MM-DD format.
         notify: Whether to notify the assigned person.
     """
-    parts = []
-    if content is not None:
-        parts.append(f"<content>{content}</content>")
-    if responsible_party_id is not None:
-        parts.append(f"<responsible-party-id>{responsible_party_id}</responsible-party-id>")
-    if due_at is not None:
-        parts.append(f"<due-at>{due_at}</due-at>")
-    if notify:
-        parts.append("<notify>true</notify>")
-    body = f"<todo-item>{''.join(parts)}</todo-item>"
-    root = _put(f"/todo_items/{todo_item_id}.xml", body)
-    return _elem_to_dict(root)
+    body = _todo_item_xml(content, responsible_party_id, due_at, notify)
+    _put(f"/todo_items/{todo_item_id}.xml", body)
+    saved = _load_saved_todo(str(todo_item_id), ET.Element("todo-item"))
+    return _with_assignment_check(_todo_item_dict(saved), responsible_party_id)
 
 
 @mcp.tool
