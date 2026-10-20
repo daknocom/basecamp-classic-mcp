@@ -143,6 +143,6 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Time entries
 - `list_time_entries(project_id, from_date, to_date)` — List time entries for a project, following every page. Pass both dates (YYYY-MM-DD) for a range such as a month. The result includes `count`, `total_hours`, and `truncated`.
-- `create_time_entry(project_id, date, hours, description, ...)` — Log time on a project
+- `create_time_entry(project_id, date, hours, description, ...)` — Log time on a project. XML-special characters in descriptions are escaped, and matching entries are not duplicated by default.
 
 Deleted intentionally: `delete_todo_item`.

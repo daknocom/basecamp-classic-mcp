@@ -2,11 +2,13 @@
 
 import html
 import json
+import logging
 import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import Optional
+from uuid import uuid4
 
 import httpx
 from fastmcp import FastMCP
@@ -19,6 +21,9 @@ BASECAMP_URL = os.environ.get("BASECAMP_URL", "").strip().rstrip("/")
 BASECAMP_USERNAME = os.environ.get("BASECAMP_USERNAME", "").strip()
 BASECAMP_PASSWORD = os.environ.get("BASECAMP_PASSWORD", "").strip()
 MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+BASECAMP_ACCOUNT_LABEL = os.environ.get("BASECAMP_ACCOUNT_LABEL", "basecamp-bot")
+
+logger = logging.getLogger("basecamp_classic_mcp")
 
 
 def _build_auth() -> Optional[StaticTokenVerifier]:
@@ -124,23 +129,65 @@ def _date_windows(start: datetime, end: datetime):
         cursor = window_end + timedelta(days=1)
 
 
-def _send(method: str, path: str, body: str = "") -> tuple[ET.Element, dict[str, str]]:
+def _redact_xml(value: str) -> str:
+    """Keep diagnostics useful without putting user content or credentials in logs."""
+    value = re.sub(
+        r"<(content|description|body|token|password|api-token)[^>]*>.*?</\1>",
+        r"<\1>[redacted]</\1>",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return value[:4_000]
+
+
+class BasecampAPIError(RuntimeError):
+    """An API error that preserves a safe, actionable response summary."""
+
+
+def _send(
+    method: str,
+    path: str,
+    body: str = "",
+    *,
+    operation: str = "basecamp_request",
+) -> tuple[ET.Element, dict[str, str]]:
+    request_id = str(uuid4())
     with _client() as client:
         response = client.request(method, path, content=body.encode() if body else None)
-        response.raise_for_status()
+        if response.is_error:
+            error_body = _redact_xml(response.text)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "basecamp_api_error",
+                        "request_id": request_id,
+                        "operation": operation,
+                        "method": method,
+                        "path": path,
+                        "status_code": response.status_code,
+                        "response_body": error_body,
+                        "request_payload": _redact_xml(body),
+                        "account": BASECAMP_ACCOUNT_LABEL,
+                    }
+                )
+            )
+            raise BasecampAPIError(
+                f"Basecamp {operation} failed (HTTP {response.status_code}; "
+                f"request {request_id}): {error_body or 'empty error response'}"
+            )
         headers = {key.lower(): value for key, value in response.headers.items()}
         if response.text.strip():
             return ET.fromstring(response.text), headers
         return ET.Element("ok"), headers
 
 
-def _post(path: str, body: str) -> ET.Element:
-    root, _headers = _send("POST", path, body)
+def _post(path: str, body: str, *, operation: str = "basecamp_post") -> ET.Element:
+    root, _headers = _send("POST", path, body, operation=operation)
     return root
 
 
-def _put(path: str, body: str = "") -> ET.Element:
-    root, _headers = _send("PUT", path, body)
+def _put(path: str, body: str = "", *, operation: str = "basecamp_put") -> ET.Element:
+    root, _headers = _send("PUT", path, body, operation=operation)
     return root
 
 
@@ -159,7 +206,7 @@ def _assignment_xml(responsible_party_id: Optional[int], notify: bool) -> list[s
 
 
 def _id_from_location(location: str) -> str:
-    match = re.search(r"/todo_items/(\d+)", location)
+    match = re.search(r"/(?:todo_items|time_entries)/(\d+)", location)
     return match.group(1) if match else ""
 
 
@@ -657,8 +704,13 @@ def create_time_entry(
     description: str,
     person_id: Optional[int] = None,
     todo_item_id: Optional[int] = None,
+    prevent_duplicate: bool = True,
 ) -> dict:
-    """Log a time entry on a project.
+    """Log a time entry on a project and return the saved record.
+
+    By default, checks the project's entries for an exact match before creating
+    one. Set prevent_duplicate to false only when intentionally logging an
+    identical entry twice.
 
     Args:
         project_id: The numeric project ID.
@@ -667,19 +719,57 @@ def create_time_entry(
         description: Description of work done.
         person_id: Optional person ID (defaults to current user).
         todo_item_id: Optional to-do item ID to associate the entry with.
+        prevent_duplicate: Return a matching existing entry instead of creating
+            another one.
     """
+    _parse_date(date)
+    if hours <= 0:
+        raise ValueError("hours must be greater than zero")
+
+    if prevent_duplicate:
+        entries, truncated = _paged(
+            f"/time_entries/report.xml?from={date.replace('-', '')}"
+            f"&to={date.replace('-', '')}&filter_project_id={project_id}",
+            "time-entry",
+        )
+        for entry in entries:
+            saved = _time_entry_dict(entry)
+            if (
+                float(saved["hours"] or 0) == float(hours)
+                and saved["description"] == description
+                and (person_id is None or saved["person_id"] == str(person_id))
+                and (todo_item_id is None or saved["todo_item_id"] == str(todo_item_id))
+            ):
+                saved["duplicate"] = True
+                saved["message"] = "Matching time entry already exists; no new entry was created."
+                return saved
+        if truncated:
+            raise RuntimeError(
+                "Could not safely check for duplicate time entries; the report was truncated."
+            )
+
     parts = [
-        f"<date>{date}</date>",
+        f"<date>{_xml_text(date)}</date>",
         f"<hours>{hours}</hours>",
-        f"<description>{description}</description>",
+        f"<description>{_xml_text(description)}</description>",
     ]
     if person_id is not None:
         parts.append(f"<person-id>{person_id}</person-id>")
     if todo_item_id is not None:
         parts.append(f"<todo-item-id>{todo_item_id}</todo-item-id>")
     xml_body = f"<time-entry>{''.join(parts)}</time-entry>"
-    root = _post(f"/projects/{project_id}/time_entries.xml", xml_body)
-    return _elem_to_dict(root)
+    root, headers = _send(
+        "POST",
+        f"/projects/{project_id}/time_entries.xml",
+        xml_body,
+        operation="create_time_entry",
+    )
+    entry_id = _id_from_location(headers.get("location", ""))
+    result = _elem_to_dict(root)
+    if entry_id:
+        result["id"] = entry_id
+    result["duplicate"] = False
+    return result
 
 
 # ─── Resources ───────────────────────────────────────────────────────────────
