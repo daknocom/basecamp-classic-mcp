@@ -632,6 +632,7 @@ def uncomplete_milestone(milestone_id: int) -> str:
 def _time_entry_dict(entry: ET.Element) -> dict:
     return {
         "id": _elem_text(entry, "id"),
+        "project_id": _elem_text(entry, "project-id"),
         "person_id": _elem_text(entry, "person-id"),
         "person_name": _elem_text(entry, "person-name"),
         "date": _elem_text(entry, "date"),
@@ -643,24 +644,32 @@ def _time_entry_dict(entry: ET.Element) -> dict:
 
 @mcp.tool(annotations=READ_ONLY)
 def list_time_entries(
-    project_id: int,
+    project_id: Optional[int] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    person_id: Optional[int] = None,
 ) -> dict:
-    """List time entries for a project, following every result page.
+    """List time entries for a project, a person, or both.
 
     Basecamp returns 50 entries per page. This walks all pages. Pass both
     from_date and to_date (YYYY-MM-DD) for a bounded report such as a month.
     Ranges longer than six months are requested in chunks, which is the
-    report endpoint's limit.
+    report endpoint's limit. A person report with no project requires both
+    dates. Results only include projects the Basecamp bot can see.
 
     Args:
-        project_id: The numeric project ID.
+        project_id: Optional numeric project ID.
         from_date: Optional start date, inclusive, YYYY-MM-DD.
         to_date: Optional end date, inclusive, YYYY-MM-DD.
+        person_id: Optional person ID. With dates and no project, this is
+            that person's time report across projects.
     """
+    if project_id is None and person_id is None:
+        raise ValueError("Pass a project_id, a person_id, or both")
     if (from_date is None) != (to_date is None):
         raise ValueError("Pass both from_date and to_date, or neither")
+    if person_id is not None and project_id is None and not from_date:
+        raise ValueError("A person time report needs both from_date and to_date")
 
     elements: list[ET.Element] = []
     truncated = False
@@ -673,8 +682,11 @@ def list_time_entries(
             path = (
                 "/time_entries/report.xml"
                 f"?from={window_start:%Y%m%d}&to={window_end:%Y%m%d}"
-                f"&filter_project_id={project_id}"
             )
+            if project_id is not None:
+                path += f"&filter_project_id={project_id}"
+            if person_id is not None:
+                path += f"&subject_id={person_id}"
             batch, hit_cap = _paged(path, "time-entry")
             elements.extend(batch)
             truncated = truncated or hit_cap
@@ -683,10 +695,18 @@ def list_time_entries(
             f"/projects/{project_id}/time_entries.xml", "time-entry"
         )
 
-    entries = [_time_entry_dict(entry) for entry in elements]
+    entries = []
+    for element in elements:
+        entry = _time_entry_dict(element)
+        if not entry["project_id"] and project_id is not None:
+            entry["project_id"] = str(project_id)
+        if person_id is not None and entry["person_id"] != str(person_id):
+            continue
+        entries.append(entry)
     total_hours = round(sum(float(entry["hours"] or 0) for entry in entries), 2)
     return {
         "project_id": project_id,
+        "person_id": person_id,
         "from_date": from_date,
         "to_date": to_date,
         "count": len(entries),
