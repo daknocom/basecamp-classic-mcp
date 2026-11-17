@@ -3,6 +3,7 @@
 import html
 import json
 import logging
+import math
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -732,10 +733,12 @@ def create_time_entry(
     one. Set prevent_duplicate to false only when intentionally logging an
     identical entry twice.
 
+    Use negative hours for adjustments or credits that reduce tracked time.
+
     Args:
         project_id: The numeric project ID.
         date: Date of the time entry in YYYY-MM-DD format.
-        hours: Number of hours to log (e.g. 1.5).
+        hours: Non-zero, finite hours to log (e.g. 1.5 or -1.5 for an adjustment).
         description: Description of work done.
         person_id: Optional person ID (defaults to current user).
         todo_item_id: Optional to-do item ID to associate the entry with.
@@ -743,8 +746,8 @@ def create_time_entry(
             another one.
     """
     _parse_date(date)
-    if hours <= 0:
-        raise ValueError("hours must be greater than zero")
+    if not math.isfinite(hours) or hours == 0:
+        raise ValueError("hours must be a finite, non-zero number")
 
     if prevent_duplicate:
         entries, truncated = _paged(
