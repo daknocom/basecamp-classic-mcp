@@ -143,6 +143,6 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Time entries
 - `list_time_entries(project_id, from_date, to_date, person_id)` — List time entries for a project, a person, or both. A person report omits `project_id` and requires both dates (YYYY-MM-DD). The result includes `count`, `total_hours`, and `truncated`.
-- `create_time_entry(project_id, date, hours, description, ...)` — Log time on a project. XML-special characters in descriptions are escaped, and matching entries are not duplicated by default.
+- `create_time_entry(project_id, date, hours, description, ...)` — Log time on a project. Negative hours (e.g. `-1.5`) record adjustments or credits that reduce tracked time and report totals. Hours must be finite and non-zero. XML-special characters in descriptions are escaped, and matching entries are not duplicated by default.
 
 Deleted intentionally: `delete_todo_item`.
